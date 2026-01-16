@@ -1,18 +1,27 @@
 import uvicorn
+import os
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, func
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from pydantic import BaseModel
 
-# Import your ML logic
-# Ensure 'train_model_final.py' is in the backend folder and you have run it once!
+# Import your Model Logic
+# Ensure 'train_model_final.py' is in the same folder!
 from train_model_final import model
 
-# --- DATABASE SETUP ---
-DATABASE_URL = "sqlite:///./anganwadi.db"
+# --- DATABASE SETUP (Updated for Cloud & Local) ---
+# 1. Get the URL from the cloud environment, or use local SQLite as a backup
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./anganwadi.db")
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+# 2. Fix a small formatting issue (Render uses 'postgres://' but Python needs 'postgresql://')
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+# 3. SQLite needs specific args, PostgreSQL does not.
+connect_args = {"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
+
+engine = create_engine(DATABASE_URL, connect_args=connect_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -38,6 +47,7 @@ class ChildRecord(Base):
     z_score = Column(Float)
     color_code = Column(String)
 
+# Create tables automatically (Safe to run every time)
 Base.metadata.create_all(bind=engine)
 
 # --- VALIDATION MODELS ---
@@ -64,13 +74,15 @@ class ChildAssessmentSchema(BaseModel):
 # --- APP SETUP ---
 app = FastAPI(title="Anganwadi Smart Assistant")
 
+# CORS: Allow mobile apps from anywhere to connect
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all connections (Crucial for mobile)
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Dependency to get DB session
 def get_db():
     db = SessionLocal()
     try:
@@ -82,6 +94,7 @@ def get_db():
 
 @app.post("/signup", status_code=status.HTTP_201_CREATED)
 def register_worker(worker: WorkerSignupSchema, db: Session = Depends(get_db)):
+    # Check if worker already exists
     existing_worker = db.query(HealthWorker).filter(
         HealthWorker.aadhar_number == worker.aadhar_number
     ).first()
@@ -118,7 +131,7 @@ def login_worker(creds: WorkerLoginSchema, db: Session = Depends(get_db)):
 
 @app.post("/assess")
 def assess_child(data: ChildAssessmentSchema, db: Session = Depends(get_db)):
-    # 1. Predict
+    # 1. PREDICT using the Logic in train_model_final.py
     result = model.predict(
         weight_kg=data.weight_kg,
         height_cm=data.height_cm,
@@ -130,7 +143,7 @@ def assess_child(data: ChildAssessmentSchema, db: Session = Depends(get_db)):
     if result["status"] == "Error":
         raise HTTPException(status_code=400, detail="Invalid Data")
 
-    # 2. Save
+    # 2. SAVE to Database
     new_child = ChildRecord(
         anganwadi_code=data.anganwadi_code,
         name=data.child_name,
@@ -152,7 +165,7 @@ def assess_child(data: ChildAssessmentSchema, db: Session = Depends(get_db)):
 
 @app.get("/stats/{anganwadi_code}")
 def get_dashboard_stats(anganwadi_code: str, db: Session = Depends(get_db)):
-    # 1. Local Stats (This Center)
+    # 1. Local Stats (Grouped by Status for THIS Anganwadi)
     local_counts = db.query(ChildRecord.status, func.count(ChildRecord.id)).filter(
         ChildRecord.anganwadi_code == anganwadi_code
     ).group_by(ChildRecord.status).all()
@@ -160,7 +173,7 @@ def get_dashboard_stats(anganwadi_code: str, db: Session = Depends(get_db)):
     local_stats = {status: count for status, count in local_counts}
     total_local = sum(local_stats.values())
 
-    # 2. Global Stats (All Centers)
+    # 2. Global Stats (Total children in the ENTIRE system)
     total_global = db.query(func.count(ChildRecord.id)).scalar()
 
     return {
@@ -171,4 +184,5 @@ def get_dashboard_stats(anganwadi_code: str, db: Session = Depends(get_db)):
     }
 
 if __name__ == "__main__":
+    # Localhost start command
     uvicorn.run(app, host="0.0.0.0", port=8000)
