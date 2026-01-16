@@ -1,0 +1,6 @@
+six
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+pygrowup
